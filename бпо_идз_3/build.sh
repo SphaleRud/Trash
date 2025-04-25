@@ -1,33 +1,63 @@
 #!/bin/bash
-# Copyright 2016 Google Inc.
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Обновлённый скрипт сборки OpenSSL 1.0.1f для Ubuntu 24.04
 
-# Подключаем вспомогательные скрипты (убедитесь, что они находятся в ../custom-build.sh и ../common.sh)
-. "$(dirname "$0")/../custom-build.sh" "$1" "$2"
-. "$(dirname "$0")/../common.sh"
+# Задаём нужную ветку/тег и URL репозитория
+OPENSSL_VERSION="OpenSSL_1_0_1f"
+GIT_REPO="https://github.com/openssl/openssl.git"
 
-build_lib() {
-  rm -rf BUILD
-  cp -rf SRC BUILD
-  # Отключаем ассемблерные оптимизации (флаг no-asm) для стабильной сборки на Ubuntu 24.04.
-  (cd BUILD && CC="$CC $CFLAGS" ./config no-asm && make clean && make)
-}
+# Названия каталогов для исходников и сборки
+SRC_DIR="SRC"
+BUILD_DIR="BUILD"
 
-# Получаем исходный код OpenSSL из Git-репозитория, выбирая тег OpenSSL_1_0_1f
-get_git_tag https://github.com/openssl/openssl.git OpenSSL_1_0_1f SRC
+# Удаляем старые исходники (если есть)
+rm -rf "$SRC_DIR"
 
-build_lib
-build_fuzzer
-
-if [[ "$FUZZING_ENGINE" == "hooks" ]]; then
-  # Если используется режим "hooks", то подключаем AddressSanitizer для возможности перехвата вызовов (memcmp и т.п.)
-  LIB_FUZZING_ENGINE="$LIB_FUZZING_ENGINE -fsanitize=address"
+echo "Клонирование репозитория OpenSSL с тегом $OPENSSL_VERSION..."
+git clone --branch "$OPENSSL_VERSION" --depth 1 "$GIT_REPO" "$SRC_DIR"
+if [ $? -ne 0 ]; then
+  echo "Ошибка: не удалось клонировать репозиторий."
+  exit 1
 fi
 
-# Собираем целевую программу фаззера, ссылаясь на собранные библиотеки libssl.a и libcrypto.a,
-# включая заголовки из каталога BUILD/include
-$CXX $CXXFLAGS "$SCRIPT_DIR/target.cc" -DCERT_PATH="\"$SCRIPT_DIR/\"" \
-  BUILD/libssl.a BUILD/libcrypto.a $LIB_FUZZING_ENGINE -I BUILD/include -o "$EXECUTABLE_NAME_BASE"
+# Функция сборки библиотеки OpenSSL
+build_lib() {
+  rm -rf "$BUILD_DIR"
+  cp -r "$SRC_DIR" "$BUILD_DIR"
+  echo "Конфигурирование и сборка OpenSSL в каталоге $BUILD_DIR..."
+  # Флаг no-asm отключает ассемблерные оптимизации, что часто требуется для OpenSSL 1.0.1f
+  (cd "$BUILD_DIR" && CC="$CC $CFLAGS" ./config no-asm && make clean && make)
+  if [ $? -ne 0 ]; then
+    echo "Ошибка сборки OpenSSL."
+    exit 1
+  fi
+}
 
-rm -rf runtime
-cp -rf "$SCRIPT_DIR/runtime" .
+build_lib
+
+# Если в корне присутствует целевой файл, компилируем его с использованием собранных библиотек.
+if [[ -f "target.cc" ]]; then
+  echo "Компиляция target.cc..."
+  # Задаём значения по умолчанию для переменных, если они не определены
+  : ${CXX:=clang++}
+  : ${CXXFLAGS:="-O2 -g"}
+  : ${LIB_FUZZING_ENGINE:=""}
+  : ${SCRIPT_DIR:=$(pwd)}
+  : ${EXECUTABLE_NAME_BASE:="fuzzer_target"}
+  
+  $CXX $CXXFLAGS "$SCRIPT_DIR/target.cc" -DCERT_PATH="\"$SCRIPT_DIR/\"" \
+    "$BUILD_DIR/libssl.a" "$BUILD_DIR/libcrypto.a" $LIB_FUZZING_ENGINE -I "$BUILD_DIR/include" -o "$EXECUTABLE_NAME_BASE"
+  
+  if [ $? -ne 0 ]; then
+    echo "Ошибка компиляции target.cc."
+    exit 1
+  fi
+fi
+
+# Если существует папка runtime, копируем её в текущий каталог.
+if [[ -d "$SCRIPT_DIR/runtime" ]]; then
+  echo "Копирование папки runtime..."
+  rm -rf runtime
+  cp -r "$SCRIPT_DIR/runtime" .
+fi
+
+echo "Сборка завершена."
